@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="referrer" content="no-referrer">
+<title>Private</title>
+<style>
+  :root { --ink: #1A1A1A; --ink5: #6E6A63; --paper: #EDE8E0; --paper0: #F5F1EA; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body { display: grid; place-items: center; padding: 16px; background: var(--paper); color: var(--ink); font: 12.5px/1.55 "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace; }
+  .card { width: min(380px, 100%); border: 2px solid var(--ink); background: var(--paper0); }
+  .hd { display: flex; justify-content: space-between; padding: 10px 14px; background: var(--ink); color: var(--paper); font-size: 10px; letter-spacing: .16em; text-transform: uppercase; }
+  .bd { padding: 22px 18px 20px; display: grid; gap: 16px; }
+  h1 { font: 400 28px/1 "Helvetica Neue", Arial, sans-serif; font-weight: 700; letter-spacing: -.01em; text-transform: uppercase; }
+  p { color: var(--ink5); }
+  .pins { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .pins input { width: 100%; height: 58px; text-align: center; font: 500 26px "IBM Plex Mono", ui-monospace, Menlo, monospace; border: 2px solid var(--ink); background: #fff; color: var(--ink); border-radius: 0; }
+  .pins input:focus { outline: 3px solid var(--ink); outline-offset: 2px; }
+  button { padding: 14px; border: 2px solid var(--ink); background: var(--ink); color: var(--paper); font: inherit; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .msg { min-height: 1.5em; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+  .msg.err { color: #8a1c1c; }
+  .ft { padding: 10px 14px; border-top: 1px solid #C7BFB1; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink5); }
+</style>
+</head>
+<body>
+<form class="card" id="f" autocomplete="off">
+  <div class="hd"><span>Private document</span><span>PIN required</span></div>
+  <div class="bd">
+    <h1>Enter PIN</h1>
+    <p>Type the 4-digit PIN from your email to open this document.</p>
+    <div class="pins" id="pins">
+      <input inputmode="numeric" pattern="[0-9]*" maxlength="1" aria-label="PIN digit 1">
+      <input inputmode="numeric" pattern="[0-9]*" maxlength="1" aria-label="PIN digit 2">
+      <input inputmode="numeric" pattern="[0-9]*" maxlength="1" aria-label="PIN digit 3">
+      <input inputmode="numeric" pattern="[0-9]*" maxlength="1" aria-label="PIN digit 4">
+    </div>
+    <button id="go" type="submit">Open</button>
+    <div class="msg" id="msg" role="status"></div>
+  </div>
+  <div class="ft">Shared privately. Please don't forward.</div>
+</form>
+<script>
+(async () => {
+  const ITER = 250000;
+  const msg = document.getElementById('msg'), go = document.getElementById('go'), boxes = [...document.querySelectorAll('.pins input')];
+  const say = (t, err) => { msg.textContent = t; msg.classList.toggle('err', !!err); };
+  const secret = new URLSearchParams(location.hash.slice(1)).get('k');
+  if (!('serviceWorker' in navigator) || !crypto.subtle) { say('Please open this link in Safari, Chrome or Edge.', true); go.disabled = true; return; }
+  if (!secret) { say('This link is incomplete. Please use the full link from your email.', true); go.disabled = true; return; }
+
+  const reg = await navigator.serviceWorker.register('sw.js', { scope: './' });
+  await navigator.serviceWorker.ready;
+  if (!navigator.serviceWorker.controller) await new Promise(r => navigator.serviceWorker.addEventListener('controllerchange', r, { once: true }));
+  const ask = data => new Promise(res => { const h = e => { navigator.serviceWorker.removeEventListener('message', h); res(e.data); }; navigator.serviceWorker.addEventListener('message', h); navigator.serviceWorker.controller.postMessage(data); });
+  const open = () => location.replace('app/index.html');
+
+  // already unlocked in this browser: go straight in
+  if ((await ask({ type: 'status' })).unlocked) return open();
+
+  boxes[0].focus();
+  boxes.forEach((b, i) => {
+    b.addEventListener('input', () => { b.value = b.value.replace(/\D/g, '').slice(-1); if (b.value && boxes[i + 1]) boxes[i + 1].focus(); if (boxes.every(x => x.value)) document.getElementById('f').requestSubmit(); });
+    b.addEventListener('keydown', e => { if (e.key === 'Backspace' && !b.value && boxes[i - 1]) boxes[i - 1].focus(); });
+    b.addEventListener('paste', e => { const d = (e.clipboardData.getData('text') || '').replace(/\D/g, '').slice(0, 4); if (d.length) { e.preventDefault(); d.split('').forEach((c, k) => boxes[k] && (boxes[k].value = c)); if (d.length === 4) document.getElementById('f').requestSubmit(); } });
+  });
+
+  let tries = 0;
+  document.getElementById('f').addEventListener('submit', async e => {
+    e.preventDefault();
+    const pin = boxes.map(b => b.value).join('');
+    if (!/^\d{4}$/.test(pin)) return say('Enter all 4 digits.', true);
+    go.disabled = true; say('Checking…');
+    try {
+      const raw = Uint8Array.from(atob(secret.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+      const salt = new Uint8Array([...raw, ...new TextEncoder().encode('tbc-packet-v1')]);
+      const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
+      const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: ITER, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+      const r = await fetch('x/m.bin', { cache: 'no-cache' });
+      if (!r.ok) throw new Error('missing');
+      const buf = new Uint8Array(await r.arrayBuffer());
+      const manifest = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: buf.slice(0, 12) }, key, buf.slice(12))));
+      say('Opening…');
+      await ask({ type: 'unlock', key, files: manifest.files });
+      open();
+    } catch (err) {
+      tries++;
+      boxes.forEach(b => b.value = ''); boxes[0].focus();
+      say(err.message === 'missing' ? 'This document is no longer available.' : 'Wrong PIN. Try again.', true);
+      setTimeout(() => { go.disabled = false; }, Math.min(8000, 400 * tries * tries));
+    }
+  });
+})();
+</script>
+</body>
+</html>
