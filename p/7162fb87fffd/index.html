@@ -9,17 +9,20 @@
 <style>
   :root { --ink: #1A1A1A; --ink5: #6E6A63; --paper: #EDE8E0; --paper0: #F5F1EA; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; }
-  body { display: grid; place-items: center; padding: 16px; background: var(--paper); color: var(--ink); font: 12.5px/1.55 "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace; }
+  html, body { min-height: 100%; }
+  body { display: grid; place-items: center; min-height: 100vh; padding: 16px; background: var(--paper); color: var(--ink); font: 12.5px/1.55 "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace; }
   .card { width: min(380px, 100%); border: 2px solid var(--ink); background: var(--paper0); }
   .hd { display: flex; justify-content: space-between; padding: 10px 14px; background: var(--ink); color: var(--paper); font-size: 10px; letter-spacing: .16em; text-transform: uppercase; }
   .bd { padding: 22px 18px 20px; display: grid; gap: 16px; }
-  h1 { font: 400 28px/1 "Helvetica Neue", Arial, sans-serif; font-weight: 700; letter-spacing: -.01em; text-transform: uppercase; }
+  h1 { font: 700 28px/1 "Helvetica Neue", Arial, sans-serif; letter-spacing: -.01em; text-transform: uppercase; }
   p { color: var(--ink5); }
-  .pins { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-  .pins input { width: 100%; height: 58px; text-align: center; font: 500 26px "IBM Plex Mono", ui-monospace, Menlo, monospace; border: 2px solid var(--ink); background: #fff; color: var(--ink); border-radius: 0; }
-  .pins input:focus { outline: 3px solid var(--ink); outline-offset: 2px; }
-  button { padding: 14px; border: 2px solid var(--ink); background: var(--ink); color: var(--paper); font: inherit; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; cursor: pointer; }
+  /* one field, drawn as four boxes: reliable with phone keyboards and code autofill */
+  .pinwrap { position: relative; display: block; height: 58px; }
+  .pinwrap .cells { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; pointer-events: none; }
+  .pinwrap .cells span { border: 2px solid var(--ink); background: #fff; display: grid; place-items: center; font: 500 26px "IBM Plex Mono", ui-monospace, Menlo, monospace; }
+  .pinwrap .cells span.cur { outline: 3px solid var(--ink); outline-offset: 2px; }
+  #pin { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0.01; font-size: 16px; border: 0; color: transparent; background: transparent; caret-color: transparent; }
+  button { padding: 14px; border: 2px solid var(--ink); background: var(--ink); color: var(--paper); font: inherit; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; cursor: pointer; -webkit-appearance: none; border-radius: 0; }
   button:disabled { opacity: .5; cursor: wait; }
   .msg { min-height: 1.5em; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
   .msg.err { color: #8a1c1c; }
@@ -27,72 +30,116 @@
 </style>
 </head>
 <body>
-<form class="card" id="f" autocomplete="off">
+<form class="card" id="f" autocomplete="off" action="javascript:void(0)">
   <div class="hd"><span>Private document</span><span>PIN required</span></div>
   <div class="bd">
     <h1>Enter PIN</h1>
     <p>Type the 4-digit PIN from your email to open this document.</p>
-    <div class="pins" id="pins">
-      <input inputmode="numeric" pattern="[0-9]*" maxlength="1" aria-label="PIN digit 1">
-      <input inputmode="numeric" pattern="[0-9]*" maxlength="1" aria-label="PIN digit 2">
-      <input inputmode="numeric" pattern="[0-9]*" maxlength="1" aria-label="PIN digit 3">
-      <input inputmode="numeric" pattern="[0-9]*" maxlength="1" aria-label="PIN digit 4">
-    </div>
+    <label class="pinwrap" for="pin">
+      <input id="pin" name="pin" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="one-time-code" aria-label="4-digit PIN" autofocus>
+      <span class="cells" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+    </label>
     <button id="go" type="submit">Open</button>
     <div class="msg" id="msg" role="status"></div>
   </div>
   <div class="ft">Shared privately. Please don't forward.</div>
 </form>
 <script>
-(async () => {
-  const ITER = 250000;
-  const msg = document.getElementById('msg'), go = document.getElementById('go'), boxes = [...document.querySelectorAll('.pins input')];
-  const say = (t, err) => { msg.textContent = t; msg.classList.toggle('err', !!err); };
-  const secret = new URLSearchParams(location.hash.slice(1)).get('k');
-  if (!('serviceWorker' in navigator) || !crypto.subtle) { say('Please open this link in Safari, Chrome or Edge.', true); go.disabled = true; return; }
-  if (!secret) { say('This link is incomplete. Please use the full link from your email.', true); go.disabled = true; return; }
+(function () {
+  var ITER = 250000;
+  var form = document.getElementById('f'), pinEl = document.getElementById('pin'), go = document.getElementById('go'), msg = document.getElementById('msg');
+  var cells = document.querySelectorAll('.cells span');
+  function say(t, err) { msg.textContent = t; msg.className = 'msg' + (err ? ' err' : ''); }
+  function draw() {
+    var v = pinEl.value;
+    for (var i = 0; i < 4; i++) { cells[i].textContent = v[i] ? '•' : ''; cells[i].className = (document.activeElement === pinEl && i === Math.min(v.length, 3)) ? 'cur' : ''; }
+  }
+  var secret = new URLSearchParams(location.hash.slice(1)).get('k');
+  var hasSW = 'serviceWorker' in navigator, hasCrypto = !!(window.crypto && crypto.subtle);
 
-  const reg = await navigator.serviceWorker.register('sw.js', { scope: './' });
-  await navigator.serviceWorker.ready;
-  if (!navigator.serviceWorker.controller) await new Promise(r => navigator.serviceWorker.addEventListener('controllerchange', r, { once: true }));
-  const ask = data => new Promise(res => { const h = e => { navigator.serviceWorker.removeEventListener('message', h); res(e.data); }; navigator.serviceWorker.addEventListener('message', h); navigator.serviceWorker.controller.postMessage(data); });
-  const open = () => location.replace('app/index.html');
+  // 1. Wire up the PIN box and Open button straight away (never wait on anything first)
+  pinEl.addEventListener('input', function () { pinEl.value = pinEl.value.replace(/\D/g, '').slice(0, 4); draw(); if (pinEl.value.length === 4) unlock(); });
+  pinEl.addEventListener('focus', draw); pinEl.addEventListener('blur', draw);
+  form.addEventListener('submit', function (e) { e.preventDefault(); unlock(); });
+  draw();
+
+  if (!secret) { say('This link is incomplete. Please use the full link from your email. (E1)', true); go.disabled = true; return; }
+  if (!hasCrypto || !hasSW) {
+    say('This browser can’t open private documents. On iPhone: open the link in Safari (not inside an app), and turn off Private Browsing. (E2)', true);
+    go.disabled = true; return;
+  }
+
+  // 2. Get the decrypting helper (service worker) ready in the background
+  var swReady = navigator.serviceWorker.register('sw.js', { scope: './' })
+    .then(function () { return navigator.serviceWorker.ready; })
+    .catch(function (err) { throw new Error('E3 ' + (err && err.name)); });
+  swReady.catch(function () {});
+
+  function controller() {
+    // the page must be controlled by the helper for the packet to load; a reload fixes it if the phone hasn't handed over yet
+    return swReady.then(function () {
+      if (navigator.serviceWorker.controller) return navigator.serviceWorker.controller;
+      return new Promise(function (res, rej) {
+        var t = setTimeout(function () { rej(new Error('E4')); }, 4000);
+        navigator.serviceWorker.addEventListener('controllerchange', function () { clearTimeout(t); res(navigator.serviceWorker.controller); }, { once: true });
+      });
+    });
+  }
+  function ask(data) {
+    return controller().then(function (c) {
+      return new Promise(function (res, rej) {
+        var ch = new MessageChannel(), t = setTimeout(function () { rej(new Error('E5')); }, 8000);
+        ch.port1.onmessage = function (e) { clearTimeout(t); res(e.data); };
+        c.postMessage(data, [ch.port2]);
+      });
+    });
+  }
+  function open() { sessionStorage.removeItem('tbc-reloaded'); location.replace('app/index.html'); }
+  function b64(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; var bin = atob(s), out = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
 
   // already unlocked in this browser: go straight in
-  if ((await ask({ type: 'status' })).unlocked) return open();
+  ask({ type: 'status' }).then(function (r) { if (r && r.unlocked) open(); }).catch(function () {});
 
-  boxes[0].focus();
-  boxes.forEach((b, i) => {
-    b.addEventListener('input', () => { b.value = b.value.replace(/\D/g, '').slice(-1); if (b.value && boxes[i + 1]) boxes[i + 1].focus(); if (boxes.every(x => x.value)) document.getElementById('f').requestSubmit(); });
-    b.addEventListener('keydown', e => { if (e.key === 'Backspace' && !b.value && boxes[i - 1]) boxes[i - 1].focus(); });
-    b.addEventListener('paste', e => { const d = (e.clipboardData.getData('text') || '').replace(/\D/g, '').slice(0, 4); if (d.length) { e.preventDefault(); d.split('').forEach((c, k) => boxes[k] && (boxes[k].value = c)); if (d.length === 4) document.getElementById('f').requestSubmit(); } });
-  });
-
-  let tries = 0;
-  document.getElementById('f').addEventListener('submit', async e => {
-    e.preventDefault();
-    const pin = boxes.map(b => b.value).join('');
-    if (!/^\d{4}$/.test(pin)) return say('Enter all 4 digits.', true);
-    go.disabled = true; say('Checking…');
-    try {
-      const raw = Uint8Array.from(atob(secret.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
-      const salt = new Uint8Array([...raw, ...new TextEncoder().encode('tbc-packet-v1')]);
-      const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
-      const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: ITER, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
-      const r = await fetch('x/m.bin', { cache: 'no-cache' });
-      if (!r.ok) throw new Error('missing');
-      const buf = new Uint8Array(await r.arrayBuffer());
-      const manifest = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: buf.slice(0, 12) }, key, buf.slice(12))));
-      say('Opening…');
-      await ask({ type: 'unlock', key, files: manifest.files });
-      open();
-    } catch (err) {
-      tries++;
-      boxes.forEach(b => b.value = ''); boxes[0].focus();
-      say(err.message === 'missing' ? 'This document is no longer available.' : 'Wrong PIN. Try again.', true);
-      setTimeout(() => { go.disabled = false; }, Math.min(8000, 400 * tries * tries));
-    }
-  });
+  var busy = false, tries = 0;
+  function unlock() {
+    if (busy) return;
+    var pin = pinEl.value;
+    if (!/^\d{4}$/.test(pin)) { say('Enter all 4 digits.', true); return; }
+    busy = true; go.disabled = true; say('Checking…');
+    var raw = b64(secret), salt = new Uint8Array(raw.length + 13);
+    salt.set(raw); salt.set(new TextEncoder().encode('tbc-packet-v1'), raw.length);
+    var keyBytes;
+    crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits'])
+      .then(function (base) { return crypto.subtle.deriveBits({ name: 'PBKDF2', salt: salt, iterations: ITER, hash: 'SHA-256' }, base, 256); })
+      .then(function (bits) { keyBytes = bits; return crypto.subtle.importKey('raw', bits, 'AES-GCM', false, ['decrypt']); })
+      .then(function (key) {
+        return fetch('x/m.bin', { cache: 'no-cache' }).then(function (r) {
+          if (!r.ok) throw new Error('E6');
+          return r.arrayBuffer();
+        }).then(function (buf) {
+          buf = new Uint8Array(buf);
+          return crypto.subtle.decrypt({ name: 'AES-GCM', iv: buf.slice(0, 12) }, key, buf.slice(12))
+            .catch(function () { throw new Error('PIN'); });
+        });
+      })
+      .then(function (plain) {
+        var manifest = JSON.parse(new TextDecoder().decode(plain));
+        say('Opening…');
+        // hand the helper plain key bytes (every browser can pass these; some can't pass a key object)
+        return ask({ type: 'unlock', keyBytes: keyBytes, files: manifest.files });
+      })
+      .then(function (r) { if (!r || !r.ok) throw new Error('E7 ' + ((r && r.error) || '')); open(); })
+      .catch(function (err) {
+        busy = false; tries++;
+        var m = String((err && err.message) || err);
+        if (m === 'PIN') { pinEl.value = ''; draw(); pinEl.focus(); say('Wrong PIN. Try again.', true); }
+        else if (m === 'E6') say('This document is no longer available. (E6)', true);
+        else if (m.indexOf('E4') === 0 && !sessionStorage.getItem('tbc-reloaded')) { sessionStorage.setItem('tbc-reloaded', '1'); say('One moment…'); location.reload(); return; }
+        else if (m.indexOf('E3') === 0) say('Your browser is blocking this page’s storage. On iPhone: Settings › Safari › turn off “Block All Cookies”, and don’t use Private Browsing. (' + m + ')', true);
+        else say('Couldn’t open it. Please reload and try again. (' + m.slice(0, 40) + ')', true);
+        setTimeout(function () { go.disabled = false; }, Math.min(8000, 400 * tries * tries));
+      });
+  }
 })();
 </script>
 </body>
