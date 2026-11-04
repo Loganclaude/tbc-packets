@@ -62,13 +62,13 @@
   draw();
 
   if (!secret) { say('This link is incomplete. Please use the full link from your email. (E1)', true); go.disabled = true; return; }
-  if (!hasCrypto || !hasSW) {
-    say('This browser can’t open private documents. On iPhone: open the link in Safari (not inside an app), and turn off Private Browsing. (E2)', true);
+  if (!hasCrypto) {
+    say('This browser can’t open private documents. Please open the link in Safari or Chrome. (E2)', true);
     go.disabled = true; return;
   }
 
   // 2. Get the decrypting helper (service worker) ready in the background
-  var swReady = navigator.serviceWorker.register('sw.js', { scope: './' })
+  var swReady = (hasSW ? navigator.serviceWorker.register('sw.js', { scope: './' }) : Promise.reject(new Error('no service worker')))
     .then(function () { return navigator.serviceWorker.ready; })
     .catch(function (err) { throw new Error('E3 ' + (err && err.name)); });
   swReady.catch(function () {});
@@ -98,6 +98,42 @@
   // already unlocked in this browser: go straight in
   ask({ type: 'status' }).then(function (r) { if (r && r.unlocked) open(); }).catch(function () {});
 
+  // Fallback when the decrypting helper can't run (in-app browsers, Private Browsing, blocked storage): unscramble the
+  // whole pack here in memory, point the page's own file references at those in-memory copies, and open it from memory.
+  // Nothing touches storage; closing the tab forgets everything.
+  function blobOpen(key, files) {
+    var names = Object.keys(files), plain = {}, made = {};
+    var textType = /^(text\/|application\/(json|javascript))/;
+    var byLength = names.slice().sort(function (a, b) { return b.length - a.length; });
+    function esc(x) { return x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+    function make(rel) {
+      if (made[rel]) return made[rel];
+      var e = plain[rel], body = e.body;
+      if (textType.test(e.type) && rel !== 'index.html') body = rewrite(new TextDecoder().decode(e.body), rel);
+      made[rel] = URL.createObjectURL(new Blob([body], { type: e.type }));
+      return made[rel];
+    }
+    function rewrite(text, self) {
+      byLength.forEach(function (rel) {
+        if (rel === self || text.indexOf(rel) < 0) return;
+        var u = make(rel);
+        text = text.replace(new RegExp('(^|[^\\w/.-])' + esc(rel) + '(\\?[\\w=.&-]*)?', 'g'), function (m, pre) { return pre + u; });
+      });
+      return text;
+    }
+    say('Opening… (0/' + names.length + ')');
+    var done = 0;
+    return Promise.all(names.map(function (rel) {
+      return fetch('x/' + files[rel].n + '.bin', { cache: 'no-cache' }).then(function (r) { if (!r.ok) throw new Error('E6'); return r.arrayBuffer(); })
+        .then(function (buf) { buf = new Uint8Array(buf); return crypto.subtle.decrypt({ name: 'AES-GCM', iv: buf.slice(0, 12) }, key, buf.slice(12)); })
+        .then(function (out) { plain[rel] = { body: out, type: files[rel].t }; done++; say('Opening… (' + done + '/' + names.length + ')'); });
+    })).then(function () {
+      var html = rewrite(new TextDecoder().decode(plain['index.html'].body), 'index.html');
+      made['index.html'] = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+      location.replace(made['index.html']);
+    });
+  }
+
   var busy = false, tries = 0;
   function unlock() {
     if (busy) return;
@@ -106,10 +142,10 @@
     busy = true; go.disabled = true; say('Checking…');
     var raw = b64(secret), salt = new Uint8Array(raw.length + 13);
     salt.set(raw); salt.set(new TextEncoder().encode('tbc-packet-v1'), raw.length);
-    var keyBytes;
+    var keyBytes, aesKey;
     crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits'])
       .then(function (base) { return crypto.subtle.deriveBits({ name: 'PBKDF2', salt: salt, iterations: ITER, hash: 'SHA-256' }, base, 256); })
-      .then(function (bits) { keyBytes = bits; return crypto.subtle.importKey('raw', bits, 'AES-GCM', false, ['decrypt']); })
+      .then(function (bits) { keyBytes = bits; aesKey = crypto.subtle.importKey('raw', bits, 'AES-GCM', false, ['decrypt']); return aesKey; })
       .then(function (key) {
         return fetch('x/m.bin', { cache: 'no-cache' }).then(function (r) {
           if (!r.ok) throw new Error('E6');
@@ -124,9 +160,14 @@
         var manifest = JSON.parse(new TextDecoder().decode(plain));
         say('Opening…');
         // hand the helper plain key bytes (every browser can pass these; some can't pass a key object)
-        return ask({ type: 'unlock', keyBytes: keyBytes, files: manifest.files });
+        return ask({ type: 'unlock', keyBytes: keyBytes, files: manifest.files })
+          .then(function (r) { if (!r || !r.ok) throw new Error('E7 ' + ((r && r.error) || '')); open(); })
+          .catch(function (err) {                       // the helper can't run here: open from memory instead
+            var m = String((err && err.message) || err);
+            if (/^E[3457]/.test(m)) return aesKey.then(function (k) { return blobOpen(k, manifest.files); });
+            throw err;
+          });
       })
-      .then(function (r) { if (!r || !r.ok) throw new Error('E7 ' + ((r && r.error) || '')); open(); })
       .catch(function (err) {
         busy = false; tries++;
         var m = String((err && err.message) || err);
