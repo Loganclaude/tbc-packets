@@ -16,12 +16,9 @@
   .bd { padding: 22px 18px 20px; display: grid; gap: 16px; }
   h1 { font: 700 28px/1 "Helvetica Neue", Arial, sans-serif; letter-spacing: -.01em; text-transform: uppercase; }
   p { color: var(--ink5); }
-  /* one field, drawn as four boxes: reliable with phone keyboards and code autofill */
-  .pinwrap { position: relative; display: block; height: 58px; }
-  .pinwrap .cells { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; pointer-events: none; }
-  .pinwrap .cells span { border: 2px solid var(--ink); background: #fff; display: grid; place-items: center; font: 500 26px "IBM Plex Mono", ui-monospace, Menlo, monospace; }
-  .pinwrap .cells span.cur { outline: 3px solid var(--ink); outline-offset: 2px; }
-  #pin { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0.01; font-size: 16px; border: 0; color: transparent; background: transparent; caret-color: transparent; }
+  /* one plain field for a word code */
+  #pin { display: block; width: 100%; height: 58px; padding: 0 14px; border: 2px solid var(--ink); background: #fff; color: var(--ink); font: 500 22px "IBM Plex Mono", ui-monospace, Menlo, monospace; letter-spacing: .08em; border-radius: 0; -webkit-appearance: none; }
+  #pin:focus { outline: 3px solid var(--ink); outline-offset: 2px; }
   button { padding: 14px; border: 2px solid var(--ink); background: var(--ink); color: var(--paper); font: inherit; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; cursor: pointer; -webkit-appearance: none; border-radius: 0; }
   button:disabled { opacity: .5; cursor: wait; }
   .msg { min-height: 1.5em; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
@@ -31,14 +28,11 @@
 </head>
 <body>
 <form class="card" id="f" autocomplete="off" action="javascript:void(0)">
-  <div class="hd"><span>Private document</span><span>PIN required</span></div>
+  <div class="hd"><span>Private document</span><span>Code required</span></div>
   <div class="bd">
-    <h1>Enter PIN</h1>
-    <p>Type the 4-digit PIN from your email to open this document.</p>
-    <label class="pinwrap" for="pin">
-      <input id="pin" name="pin" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="one-time-code" aria-label="4-digit PIN" autofocus>
-      <span class="cells" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
-    </label>
+    <h1>Enter code</h1>
+    <p>Type the code you were sent to open this document.</p>
+    <input id="pin" name="code" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-label="Code" placeholder="Code" autofocus>
     <button id="go" type="submit">Open</button>
     <div class="msg" id="msg" role="status"></div>
   </div>
@@ -48,18 +42,12 @@
 (function () {
   var ITER = 250000;
   var form = document.getElementById('f'), pinEl = document.getElementById('pin'), go = document.getElementById('go'), msg = document.getElementById('msg');
-  var cells = document.querySelectorAll('.cells span');
   function say(t, err) { msg.textContent = t; msg.className = 'msg' + (err ? ' err' : ''); }
-  function draw() {
-    var v = pinEl.value;
-    for (var i = 0; i < 4; i++) { cells[i].textContent = v[i] ? '•' : ''; cells[i].className = (document.activeElement === pinEl && i === Math.min(v.length, 3)) ? 'cur' : ''; }
-  }
+  function draw() {}
   var secret = new URLSearchParams(location.hash.slice(1)).get('k');
   var hasSW = 'serviceWorker' in navigator, hasCrypto = !!(window.crypto && crypto.subtle);
 
   // 1. Wire up the PIN box and Open button straight away (never wait on anything first)
-  pinEl.addEventListener('input', function () { pinEl.value = pinEl.value.replace(/\D/g, '').slice(0, 4); draw(); if (pinEl.value.length === 4) unlock(); });
-  pinEl.addEventListener('focus', draw); pinEl.addEventListener('blur', draw);
   form.addEventListener('submit', function (e) { e.preventDefault(); unlock(); });
   draw();
 
@@ -103,8 +91,8 @@
   var busy = false, tries = 0;
   function unlock() {
     if (busy) return;
-    var pin = pinEl.value;
-    if (!/^\d{4}$/.test(pin)) { say('Enter all 4 digits.', true); return; }
+    var pin = pinEl.value.trim().toLowerCase();
+    if (!pin) { say('Enter the code.', true); return; }
     busy = true; go.disabled = true; say('Checking…');
     var raw = b64(secret), salt = new Uint8Array(raw.length + 13);
     salt.set(raw); salt.set(new TextEncoder().encode('tbc-packet-v1'), raw.length);
@@ -132,7 +120,7 @@
       .catch(function (err) {
         busy = false; tries++;
         var m = String((err && err.message) || err);
-        if (m === 'PIN') { pinEl.value = ''; draw(); pinEl.focus(); say('Wrong PIN. Try again.', true); }
+        if (m === 'PIN') { pinEl.value = ''; draw(); pinEl.focus(); say('Wrong code. Try again.', true); }
         else if (m === 'E6') say('This document is no longer available. (E6)', true);
         else if (m.indexOf('E4') === 0 && !sessionStorage.getItem('tbc-reloaded')) { sessionStorage.setItem('tbc-reloaded', '1'); say('One moment…'); location.reload(); return; }
         else if (m.indexOf('E3') === 0) say('Your browser is blocking this page’s storage. On iPhone: Settings › Safari › turn off “Block All Cookies”, and don’t use Private Browsing. (' + m + ')', true);
